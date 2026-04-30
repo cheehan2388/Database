@@ -4,6 +4,8 @@ PostgreSQL + `ccxt` market-data ingestion pipeline for collecting, monitoring, a
 
 This project is designed to help you build a local research database for crypto markets. It can discover exchange markets, create ingestion jobs, collect historical and live data, store normalized records in PostgreSQL, run data-quality checks, and power a local market-intelligence dashboard.
 
+Dashboard demonstrate:
+![alt text](image-1.png)
 ## Table of contents
 
 - [What this project does](#what-this-project-does)
