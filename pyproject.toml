@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-data-fetch"
+version = "0.1.0"
+description = "Incremental market data ingestion pipeline backed by PostgreSQL and ccxt."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "ccxt>=4.4.24",
+  "psycopg[binary]>=3.2.1",
+  "websocket-client>=1.8.0",
+]
+
+[project.scripts]
+auto-data-fetch = "auto_data_fetch.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
