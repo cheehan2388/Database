@@ -34,11 +34,15 @@ It currently supports these workflows:
   - index-price K-line
   - open interest
   - funding rate
+  - Binance global long/short account ratio
+  - Binance taker buy/sell volume
   - Binance live liquidation events
 - Writes normalized bars into `market_data.market_data_raw`.
 - Stores derivatives metrics in dedicated tables for:
   - open interest
   - funding rate
+  - long/short account ratio
+  - taker buy/sell volume
   - liquidation events
 - Records execution state in `market_data.ingestion_run_log`.
 - Writes data-quality findings into `market_data.data_quality_issue`.
@@ -163,6 +167,7 @@ The dashboard watchlist is designed for:
 - `RAVE`
 - `BNT`
 - `TAIKO`
+- `LAB`
 
 The dashboard data layer currently targets Binance, Bybit, and KuCoin Futures USDT perpetual markets, plus Coinbase spot markets where the asset is listed.
 
@@ -177,6 +182,8 @@ For perpetual markets, the dashboard creates these streams:
 | `index_price_kline` | Index-price candles |
 | `open_interest` | Derivatives positioning |
 | `funding_rate` | Perpetual funding history |
+| `long_short_ratio` | Binance global long/short account ratio; Binance supports 5m+ periods, so dashboard 1m uses 5m ratio data |
+| `taker_buy_sell_volume` | Binance taker buy/sell volume and buy/sell ratio; Binance supports 5m+ periods, so dashboard 1m uses 5m data |
 | `liquidation` | Liquidation event stream; Binance uses its official USD-M Futures WebSocket liquidation stream |
 
 ### Coinbase spot support
@@ -187,6 +194,8 @@ Coinbase does not provide the perpetual derivatives streams used here, so these 
 
 - open interest
 - funding
+- long/short ratio
+- taker buy/sell volume
 - mark price
 - index price
 - liquidation
@@ -237,7 +246,7 @@ This loop keeps the 1m price, mark-price, and index-price streams fresh. It is i
 If you also want the derivative panels to refresh from the database:
 
 ```bash
-python -m auto_data_fetch run-watchlist-loop --intervals 1m,5m,1h,8h --datasets kline,mark_price_kline,index_price_kline,open_interest,funding_rate --max-workers 4
+python -m auto_data_fetch run-watchlist-loop --intervals 1m,5m,1h,8h --datasets kline,mark_price_kline,index_price_kline,open_interest,funding_rate,long_short_ratio,taker_buy_sell_volume --max-workers 4
 ```
 
 ### Keep Binance liquidation events collecting
@@ -245,7 +254,7 @@ python -m auto_data_fetch run-watchlist-loop --intervals 1m,5m,1h,8h --datasets 
 Run this in a separate terminal:
 
 ```bash
-python -m auto_data_fetch run-binance-liquidations --assets BTC,ETH,MYX,MOVR,UB,HUMA,RAVE,BNT,TAIKO
+python -m auto_data_fetch run-binance-liquidations --assets BTC,ETH,MYX,MOVR,UB,HUMA,RAVE,BNT,TAIKO,LAB
 ```
 
 For a short connectivity test:
@@ -307,7 +316,7 @@ The UI reads PostgreSQL through server-side API routes:
 | --- | --- |
 | `/api/watchlist` | Active dashboard assets |
 | `/api/chart` | Candlestick, volume, mark price, and index price |
-| `/api/derivatives` | Open interest, funding rate, and liquidation events |
+| `/api/derivatives` | Open interest, funding rate, long/short ratio, taker buy/sell volume, and liquidation events |
 | `/api/status` | Dashboard data freshness and row counts |
 
 The frontend loads `DATABASE_URL` from the parent project `.env` first, so you do not need to duplicate the database password in `web/.env.local`.
@@ -318,12 +327,19 @@ The main chart uses a Coinglass-style stacked layout with one synchronized time 
 | --- | --- |
 | Row 1 | Price candles, volume, mark price, and index price |
 | Row 2 | Open interest history |
-| Row 3 | Liquidation buckets |
-| Row 4 | Funding rate history |
+| Row 3 | OI / Volume ratio |
+| Row 4 | Long/short account ratio |
+| Row 5 | Taker buy/sell volume |
+| Row 6 | Liquidation buckets |
+| Row 7 | Funding rate history |
 
 Historical data and the latest available database point are plotted together.
 
 Binance liquidation will appear after `run-binance-liquidations` has captured events for the selected symbol. Bybit and KuCoin Futures liquidation will remain empty until their native connectors are added.
+
+Long/short ratio currently uses Binance's public USD-M Futures `globalLongShortAccountRatio` data. It is an account ratio, not a notional value. Binance does not expose a 1m period for this endpoint, so the dashboard uses 5m ratio data when the chart interval is 1m.
+
+Taker buy/sell volume currently uses Binance's public USD-M Futures `takerlongshortRatio` data. It contains taker buy volume, taker sell volume, and buy/sell ratio. Binance does not expose a 1m period for this endpoint, so the dashboard uses 5m taker data when the chart interval is 1m.
 
 The browser refreshes chart, derivatives, and data-quality APIs every 30 seconds while the tab is visible.
 
@@ -393,6 +409,8 @@ flowchart TD
   E --> L["open_interest_history"]
   E --> M["funding_rate_history"]
   E --> N["liquidation_event"]
+  E --> P["long_short_ratio_history"]
+  E --> Q["taker_buy_sell_volume_history"]
   G --> H["quality checks"]
   H --> I["data_quality_issue"]
   G --> J["v_market_data_watermark"]
@@ -401,6 +419,8 @@ flowchart TD
   L --> O
   M --> O
   N --> O
+  P --> O
+  Q --> O
 ```
 
 ### Core tables
@@ -413,6 +433,8 @@ flowchart TD
 | `market_data_raw` | Normalized OHLCV bars |
 | `open_interest_history` | Open interest time series |
 | `funding_rate_history` | Funding rate time series |
+| `long_short_ratio_history` | Binance global long/short account ratio time series |
+| `taker_buy_sell_volume_history` | Binance taker buy/sell volume and ratio time series |
 | `liquidation_event` | Liquidation event table |
 | `ingestion_run_log` | One row per ingestion execution |
 | `data_quality_issue` | Detected gaps, duplicates, invalid OHLC, negative volume, late data |

@@ -204,6 +204,8 @@ export default function Dashboard({
   const latestMark = chart?.markPrice.at(-1)?.value;
   const latestIndex = chart?.indexPrice.at(-1)?.value;
   const latestOi = derivatives?.openInterest.at(-1)?.value;
+  const latestLongShortRatio = derivatives?.longShortRatio.at(-1)?.value;
+  const latestTakerBuySell = derivatives?.takerBuySell.at(-1);
   const latestFunding = derivatives?.fundingRate.at(-1)?.value;
   const latestLiquidation = derivatives?.liquidations.at(-1);
   const basis = latestMark && latestIndex ? (latestMark - latestIndex) / latestIndex : null;
@@ -221,8 +223,10 @@ export default function Dashboard({
       ? (latestCandle.close - previousCandle.close) / previousCandle.close
       : null;
   const oiNote = isAggregateExchange ? "all exchanges" : interval === "1m" ? "5m fallback" : interval;
+  const longShortNote = exchange === "binance" || isAggregateExchange ? "Binance global accounts" : "Binance only";
+  const takerNote = exchange === "binance" || isAggregateExchange ? "Binance taker volume" : "Binance only";
   const volumeNote = isAggregateExchange ? "all exchange notional" : "price-row bar";
-  const liquidationNote = isAggregateExchange ? "all exchanges" : "latest bucket";
+  const liquidationNote = isAggregateExchange ? "all exchanges quote notional" : "latest bucket quote notional";
   const fundingNote = isAggregateExchange ? "average print" : "latest print";
 
   return (
@@ -236,7 +240,7 @@ export default function Dashboard({
             </h1>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-moss/75">
               Coinglass-style stacked panels on one synchronized time axis: spot or perpetual price
-              first, then open interest, liquidation, and funding rate when available.
+              first, then open interest, taker flow, liquidation, and funding rate when available.
             </p>
           </div>
 
@@ -353,6 +357,8 @@ export default function Dashboard({
               <span className="rounded-full bg-glade/15 px-3 py-1.5 text-glade">Price</span>
               <span className="rounded-full bg-moss/10 px-3 py-1.5 text-moss">Open Interest</span>
               <span className="rounded-full bg-brass/20 px-3 py-1.5 text-moss">OI / Volume</span>
+              <span className="rounded-full bg-moss/10 px-3 py-1.5 text-moss">Long / Short</span>
+              <span className="rounded-full bg-glade/15 px-3 py-1.5 text-glade">Taker Buy/Sell</span>
               <span className="rounded-full bg-ember/10 px-3 py-1.5 text-ember">Liquidation</span>
               <span className="rounded-full bg-brass/20 px-3 py-1.5 text-moss">Funding</span>
             </div>
@@ -367,10 +373,14 @@ export default function Dashboard({
             markPrice={chart?.markPrice ?? []}
             indexPrice={chart?.indexPrice ?? []}
             openInterest={derivatives?.openInterest ?? []}
+            longShortRatio={derivatives?.longShortRatio ?? []}
+            takerBuySell={derivatives?.takerBuySell ?? []}
             liquidations={derivatives?.liquidations ?? []}
             fundingRate={derivatives?.fundingRate ?? []}
             volumeBreakdown={chart?.volumeBreakdown ?? []}
             openInterestBreakdown={derivatives?.openInterestBreakdown ?? []}
+            longShortRatioBreakdown={derivatives?.longShortRatioBreakdown ?? []}
+            takerBuySellBreakdown={derivatives?.takerBuySellBreakdown ?? []}
             liquidationBreakdown={derivatives?.liquidationBreakdown ?? []}
             fundingRateBreakdown={derivatives?.fundingRateBreakdown ?? []}
           />
@@ -379,21 +389,29 @@ export default function Dashboard({
             <Metric label="Last close" value={priceNumber(latestCandle?.close)} note={pctNumber(move)} />
             <Metric label="Open interest" value={compactNumber(latestOi, 2)} note={oiNote} />
             <Metric label="OI / Volume" value={ratioNumber(oiVolumeRatio)} note="latest OI / volume" />
-            <Metric label="Liquidation" value={compactNumber(latestLiquidation?.totalValue, 2)} note={liquidationNote} />
+            <Metric label="Long / Short" value={ratioNumber(latestLongShortRatio)} note={longShortNote} />
           </div>
 
           <div className="mt-2 grid gap-2 sm:grid-cols-4">
+            <Metric label="Liquidation quote" value={compactNumber(latestLiquidation?.totalValue, 2)} note={liquidationNote} />
             <Metric label="Funding" value={pctNumber(latestFunding)} note={fundingNote} />
             <Metric label="Volume" value={compactNumber(latestCandle?.volume, 1)} note={volumeNote} />
             <Metric label="Mark price" value={priceNumber(latestMark)} note="latest mark" />
-            <Metric label="Index price" value={priceNumber(latestIndex)} note="latest index" />
           </div>
 
           <div className="mt-2 grid gap-2 sm:grid-cols-4">
+            <Metric label="Index price" value={priceNumber(latestIndex)} note="latest index" />
             <Metric label="Mark basis" value={pctNumber(basis)} note="mark vs index" />
             <Metric label="State" value={loadState === "loading" ? "Loading" : "Ready"} note="API status" />
+            <Metric label="Taker B/S" value={ratioNumber(latestTakerBuySell?.buySellRatio)} note={takerNote} />
+          </div>
+
+          <div className="mt-2 grid gap-2 sm:grid-cols-4">
+            <Metric label="Taker buy" value={compactNumber(latestTakerBuySell?.buyVolume, 2)} note="base volume" />
+            <Metric label="Taker sell" value={compactNumber(latestTakerBuySell?.sellVolume, 2)} note="base volume" />
             <Metric label="OI points" value={compactNumber(derivatives?.openInterest.length, 0)} note="history row" />
-            <Metric label="Funding points" value={compactNumber(derivatives?.fundingRate.length, 0)} note="history row" />
+            <Metric label="L/S points" value={compactNumber(derivatives?.longShortRatio.length, 0)} note="history row" />
+            <Metric label="Taker points" value={compactNumber(derivatives?.takerBuySell.length, 0)} note="history row" />
           </div>
         </section>
 
@@ -403,8 +421,10 @@ export default function Dashboard({
             <div className="mt-3 space-y-2">
               <Metric label="Open interest" value={compactNumber(latestOi, 2)} note={oiNote} />
               <Metric label="OI / Volume" value={ratioNumber(oiVolumeRatio)} note="latest OI / volume" />
+              <Metric label="Long / Short" value={ratioNumber(latestLongShortRatio)} note={longShortNote} />
+              <Metric label="Taker buy/sell" value={ratioNumber(latestTakerBuySell?.buySellRatio)} note={takerNote} />
               <Metric label="Funding rate" value={pctNumber(latestFunding)} note={fundingNote} />
-              <Metric label="Liquidations" value={compactNumber(latestLiquidation?.totalValue, 2)} note={`${derivatives?.liquidations.length ?? 0} history buckets`} />
+              <Metric label="Liquidations quote" value={compactNumber(latestLiquidation?.totalValue, 2)} note={`${derivatives?.liquidations.length ?? 0} buckets, quote notional`} />
             </div>
           </section>
 

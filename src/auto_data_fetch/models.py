@@ -88,6 +88,34 @@ class FundingRateRecord:
 
 
 @dataclass(frozen=True)
+class LongShortRatioRecord:
+    exchange: str
+    symbol: str
+    market_type: str
+    bar_interval: str
+    open_time: datetime
+    long_short_ratio: Decimal
+    long_account: Decimal | None
+    short_account: Decimal | None
+    source_dataset: str
+    run_id: UUID
+
+
+@dataclass(frozen=True)
+class TakerBuySellVolumeRecord:
+    exchange: str
+    symbol: str
+    market_type: str
+    bar_interval: str
+    open_time: datetime
+    buy_volume: Decimal | None
+    sell_volume: Decimal | None
+    buy_sell_ratio: Decimal
+    source_dataset: str
+    run_id: UUID
+
+
+@dataclass(frozen=True)
 class LiquidationRecord:
     exchange: str
     symbol: str

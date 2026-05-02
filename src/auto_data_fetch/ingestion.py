@@ -16,8 +16,10 @@ from .models import (
     FundingRateRecord,
     IngestionJob,
     LiquidationRecord,
+    LongShortRatioRecord,
     OpenInterestRecord,
     RunResult,
+    TakerBuySellVolumeRecord,
     Watermark,
 )
 from .quality import build_quality_issues
@@ -37,6 +39,10 @@ LOGGER = logging.getLogger(__name__)
 
 OHLCV_DATASETS = {"kline", "mark_price_kline", "index_price_kline"}
 KUCOIN_OPEN_INTEREST_URL = "https://api.kucoin.com/api/ua/v1/market/open-interest"
+BINANCE_LONG_SHORT_RATIO_URL = "https://fapi.binance.com/futures/data/globalLongShortAccountRatio"
+BINANCE_LONG_SHORT_RATIO_PERIODS = {"5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"}
+BINANCE_TAKER_BUY_SELL_VOLUME_URL = "https://fapi.binance.com/futures/data/takerlongshortRatio"
+BINANCE_TAKER_BUY_SELL_VOLUME_PERIODS = BINANCE_LONG_SHORT_RATIO_PERIODS
 KUCOIN_OPEN_INTEREST_INTERVALS = {
     "5m": "5min",
     "15m": "15min",
@@ -582,6 +588,281 @@ def _run_funding_rate_job(job: IngestionJob, db: Database, settings: Settings) -
             client.close()
 
 
+def _binance_market_id(client, fetch_symbol: str) -> str:
+    market = client.markets.get(fetch_symbol)
+    if market is None:
+        try:
+            market = client.market(fetch_symbol)
+        except Exception:
+            market = None
+    if market is None:
+        for candidate in client.markets.values():
+            if candidate.get("symbol") == fetch_symbol:
+                market = candidate
+                break
+    if market is None or not market.get("id"):
+        raise RuntimeError(f"Could not resolve Binance market id for {fetch_symbol!r}.")
+    return str(market["id"])
+
+
+def _fetch_binance_long_short_ratio_rows(
+    *,
+    symbol: str,
+    period: str,
+    request_start: datetime | None,
+    request_end: datetime,
+    fetch_limit: int,
+    timeout_ms: int,
+) -> list[dict[str, Any]]:
+    start_ms = datetime_to_milliseconds(request_start) + 1 if request_start else None
+    end_ms = datetime_to_milliseconds(request_end)
+    limit = max(1, min(fetch_limit, 500))
+    timeout_seconds = max(1, timeout_ms / 1000)
+    rows: list[dict[str, Any]] = []
+    last_seen_ms: int | None = None
+
+    while True:
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "period": period,
+            "limit": limit,
+            "endTime": end_ms,
+        }
+        if start_ms is not None:
+            params["startTime"] = start_ms
+        request = Request(
+            f"{BINANCE_LONG_SHORT_RATIO_URL}?{urlencode(params)}",
+            headers={"User-Agent": "auto_data_fetch/0.1"},
+        )
+        with urlopen(request, timeout=timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        if not isinstance(payload, list):
+            raise RuntimeError(f"Binance long/short ratio API failed: {payload}")
+        if not payload:
+            break
+
+        timestamp_values = [
+            int(row["timestamp"])
+            for row in payload
+            if isinstance(row, dict) and row.get("timestamp") is not None
+        ]
+        if not timestamp_values:
+            break
+
+        clipped_batch = [
+            row
+            for row in payload
+            if row.get("timestamp") is not None
+            and (start_ms is None or int(row["timestamp"]) >= start_ms)
+            and int(row["timestamp"]) <= end_ms
+        ]
+        rows.extend(clipped_batch)
+
+        batch_last_ms = max(timestamp_values)
+        if batch_last_ms >= end_ms:
+            break
+        if len(payload) < limit:
+            break
+        if last_seen_ms == batch_last_ms:
+            break
+        last_seen_ms = batch_last_ms
+        start_ms = batch_last_ms + 1
+
+    rows_by_timestamp = {
+        int(row["timestamp"]): row
+        for row in rows
+        if row.get("timestamp") is not None
+        and row.get("longShortRatio") is not None
+    }
+    return [rows_by_timestamp[key] for key in sorted(rows_by_timestamp)]
+
+
+def _run_long_short_ratio_job(job: IngestionJob, db: Database, settings: Settings) -> RunResult:
+    watermark = db.get_long_short_ratio_watermark(job)
+    request_start, request_end = _compute_simple_bounds(job, watermark)
+    if job.exchange == "binance" and request_start is not None:
+        # Binance only exposes the latest 30 days for global long/short account ratio.
+        request_start = max(request_start, request_end - timedelta(days=29))
+
+    run_id = db.create_run_log(job, to_naive_utc(request_start), to_naive_utc(request_end))
+    client = None
+    try:
+        if job.exchange != "binance":
+            message = "long_short_ratio is currently implemented for Binance USD-M futures only."
+            db.finalize_run_log(run_id, status="skipped", rows_fetched=0, rows_inserted=0, rows_updated=0, error_message=message)
+            return RunResult(job.job_name, run_id, "skipped", 0, 0, 0, 0)
+        if job.bar_interval not in BINANCE_LONG_SHORT_RATIO_PERIODS:
+            message = f"Binance long_short_ratio does not support interval={job.bar_interval!r}."
+            db.finalize_run_log(run_id, status="skipped", rows_fetched=0, rows_inserted=0, rows_updated=0, error_message=message)
+            return RunResult(job.job_name, run_id, "skipped", 0, 0, 0, 0)
+
+        client = create_exchange_client(job, timeout_ms=settings.ccxt_timeout_ms)
+        market = resolve_market(client, job)
+        native_symbol = _binance_market_id(client, market.fetch_symbol)
+        rows = _fetch_binance_long_short_ratio_rows(
+            symbol=native_symbol,
+            period=job.bar_interval,
+            request_start=request_start,
+            request_end=request_end,
+            fetch_limit=settings.fetch_limit,
+            timeout_ms=settings.ccxt_timeout_ms,
+        )
+        records = [
+            LongShortRatioRecord(
+                exchange=job.exchange,
+                symbol=job.symbol,
+                market_type=job.market_type,
+                bar_interval=job.bar_interval,
+                open_time=to_naive_utc(milliseconds_to_datetime(int(row["timestamp"]))),
+                long_short_ratio=Decimal(str(row["longShortRatio"])),
+                long_account=_decimal_or_none(row.get("longAccount")),
+                short_account=_decimal_or_none(row.get("shortAccount")),
+                source_dataset=job.source_dataset,
+                run_id=run_id,
+            )
+            for row in rows
+            if row.get("timestamp") is not None and row.get("longShortRatio") is not None
+        ]
+        return _finalize_success(db, run_id, job.job_name, len(rows), db.insert_long_short_ratios(records))
+    except Exception as exc:
+        LOGGER.exception("Job %s failed.", job.job_name)
+        db.finalize_run_log(run_id, status="failed", rows_fetched=0, rows_inserted=0, rows_updated=0, error_message=str(exc))
+        raise
+    finally:
+        if client is not None and hasattr(client, "close"):
+            client.close()
+
+
+def _fetch_binance_taker_buy_sell_volume_rows(
+    *,
+    symbol: str,
+    period: str,
+    request_start: datetime | None,
+    request_end: datetime,
+    fetch_limit: int,
+    timeout_ms: int,
+) -> list[dict[str, Any]]:
+    start_ms = datetime_to_milliseconds(request_start) + 1 if request_start else None
+    end_ms = datetime_to_milliseconds(request_end)
+    limit = max(1, min(fetch_limit, 500))
+    timeout_seconds = max(1, timeout_ms / 1000)
+    rows: list[dict[str, Any]] = []
+    last_seen_ms: int | None = None
+
+    while True:
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "period": period,
+            "limit": limit,
+            "endTime": end_ms,
+        }
+        if start_ms is not None:
+            params["startTime"] = start_ms
+        request = Request(
+            f"{BINANCE_TAKER_BUY_SELL_VOLUME_URL}?{urlencode(params)}",
+            headers={"User-Agent": "auto_data_fetch/0.1"},
+        )
+        with urlopen(request, timeout=timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        if not isinstance(payload, list):
+            raise RuntimeError(f"Binance taker buy/sell volume API failed: {payload}")
+        if not payload:
+            break
+
+        timestamp_values = [
+            int(row["timestamp"])
+            for row in payload
+            if isinstance(row, dict) and row.get("timestamp") is not None
+        ]
+        if not timestamp_values:
+            break
+
+        clipped_batch = [
+            row
+            for row in payload
+            if row.get("timestamp") is not None
+            and (start_ms is None or int(row["timestamp"]) >= start_ms)
+            and int(row["timestamp"]) <= end_ms
+        ]
+        rows.extend(clipped_batch)
+
+        batch_last_ms = max(timestamp_values)
+        if batch_last_ms >= end_ms:
+            break
+        if len(payload) < limit:
+            break
+        if last_seen_ms == batch_last_ms:
+            break
+        last_seen_ms = batch_last_ms
+        start_ms = batch_last_ms + 1
+
+    rows_by_timestamp = {
+        int(row["timestamp"]): row
+        for row in rows
+        if row.get("timestamp") is not None
+        and row.get("buySellRatio") is not None
+    }
+    return [rows_by_timestamp[key] for key in sorted(rows_by_timestamp)]
+
+
+def _run_taker_buy_sell_volume_job(job: IngestionJob, db: Database, settings: Settings) -> RunResult:
+    watermark = db.get_taker_buy_sell_volume_watermark(job)
+    request_start, request_end = _compute_simple_bounds(job, watermark)
+    if job.exchange == "binance" and request_start is not None:
+        # Binance only exposes the latest 30 days for taker buy/sell volume.
+        request_start = max(request_start, request_end - timedelta(days=29))
+
+    run_id = db.create_run_log(job, to_naive_utc(request_start), to_naive_utc(request_end))
+    client = None
+    try:
+        if job.exchange != "binance":
+            message = "taker_buy_sell_volume is currently implemented for Binance USD-M futures only."
+            db.finalize_run_log(run_id, status="skipped", rows_fetched=0, rows_inserted=0, rows_updated=0, error_message=message)
+            return RunResult(job.job_name, run_id, "skipped", 0, 0, 0, 0)
+        if job.bar_interval not in BINANCE_TAKER_BUY_SELL_VOLUME_PERIODS:
+            message = f"Binance taker_buy_sell_volume does not support interval={job.bar_interval!r}."
+            db.finalize_run_log(run_id, status="skipped", rows_fetched=0, rows_inserted=0, rows_updated=0, error_message=message)
+            return RunResult(job.job_name, run_id, "skipped", 0, 0, 0, 0)
+
+        client = create_exchange_client(job, timeout_ms=settings.ccxt_timeout_ms)
+        market = resolve_market(client, job)
+        native_symbol = _binance_market_id(client, market.fetch_symbol)
+        rows = _fetch_binance_taker_buy_sell_volume_rows(
+            symbol=native_symbol,
+            period=job.bar_interval,
+            request_start=request_start,
+            request_end=request_end,
+            fetch_limit=settings.fetch_limit,
+            timeout_ms=settings.ccxt_timeout_ms,
+        )
+        records = [
+            TakerBuySellVolumeRecord(
+                exchange=job.exchange,
+                symbol=job.symbol,
+                market_type=job.market_type,
+                bar_interval=job.bar_interval,
+                open_time=to_naive_utc(milliseconds_to_datetime(int(row["timestamp"]))),
+                buy_volume=_decimal_or_none(row.get("buyVol")),
+                sell_volume=_decimal_or_none(row.get("sellVol")),
+                buy_sell_ratio=Decimal(str(row["buySellRatio"])),
+                source_dataset=job.source_dataset,
+                run_id=run_id,
+            )
+            for row in rows
+            if row.get("timestamp") is not None and row.get("buySellRatio") is not None
+        ]
+        return _finalize_success(db, run_id, job.job_name, len(rows), db.insert_taker_buy_sell_volumes(records))
+    except Exception as exc:
+        LOGGER.exception("Job %s failed.", job.job_name)
+        db.finalize_run_log(run_id, status="failed", rows_fetched=0, rows_inserted=0, rows_updated=0, error_message=str(exc))
+        raise
+    finally:
+        if client is not None and hasattr(client, "close"):
+            client.close()
+
+
 def _run_liquidation_job(job: IngestionJob, db: Database, settings: Settings) -> RunResult:
     watermark = db.get_event_watermark(job, "liquidation_event", "liquidation_time")
     request_start, request_end = _compute_simple_bounds(job, watermark)
@@ -643,6 +924,10 @@ def run_job(job: IngestionJob, db: Database, settings: Settings) -> RunResult:
         return _run_open_interest_job(job, db, settings)
     if job.source_dataset == "funding_rate":
         return _run_funding_rate_job(job, db, settings)
+    if job.source_dataset == "long_short_ratio":
+        return _run_long_short_ratio_job(job, db, settings)
+    if job.source_dataset == "taker_buy_sell_volume":
+        return _run_taker_buy_sell_volume_job(job, db, settings)
     if job.source_dataset == "liquidation":
         return _run_liquidation_job(job, db, settings)
     raise RuntimeError(f"Unsupported source_dataset={job.source_dataset!r}.")

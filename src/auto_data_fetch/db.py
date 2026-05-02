@@ -14,9 +14,11 @@ from .models import (
     FundingRateRecord,
     IngestionJob,
     LiquidationRecord,
+    LongShortRatioRecord,
     OpenInterestRecord,
     QualityIssueRecord,
     SeedJobRecord,
+    TakerBuySellVolumeRecord,
     Watermark,
 )
 
@@ -209,6 +211,64 @@ class Database:
               COUNT(*) AS row_count,
               MAX(ingested_at) AS last_ingested_at
             FROM market_data.open_interest_history
+            WHERE exchange = %s
+              AND symbol = %s
+              AND market_type = %s
+              AND bar_interval = %s
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                query,
+                (job.exchange, job.symbol, job.market_type, job.bar_interval),
+            ).fetchone()
+        if row is None or row["row_count"] == 0:
+            return None
+        return Watermark(
+            first_open_time=row["first_open_time"],
+            last_open_time=row["last_open_time"],
+            last_close_time=row["last_close_time"],
+            row_count=row["row_count"],
+            last_ingested_at=row["last_ingested_at"],
+        )
+
+    def get_long_short_ratio_watermark(self, job: IngestionJob) -> Watermark | None:
+        query = """
+            SELECT
+              MIN(open_time) AS first_open_time,
+              MAX(open_time) AS last_open_time,
+              MAX(open_time) AS last_close_time,
+              COUNT(*) AS row_count,
+              MAX(ingested_at) AS last_ingested_at
+            FROM market_data.long_short_ratio_history
+            WHERE exchange = %s
+              AND symbol = %s
+              AND market_type = %s
+              AND bar_interval = %s
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                query,
+                (job.exchange, job.symbol, job.market_type, job.bar_interval),
+            ).fetchone()
+        if row is None or row["row_count"] == 0:
+            return None
+        return Watermark(
+            first_open_time=row["first_open_time"],
+            last_open_time=row["last_open_time"],
+            last_close_time=row["last_close_time"],
+            row_count=row["row_count"],
+            last_ingested_at=row["last_ingested_at"],
+        )
+
+    def get_taker_buy_sell_volume_watermark(self, job: IngestionJob) -> Watermark | None:
+        query = """
+            SELECT
+              MIN(open_time) AS first_open_time,
+              MAX(open_time) AS last_open_time,
+              MAX(open_time) AS last_close_time,
+              COUNT(*) AS row_count,
+              MAX(ingested_at) AS last_ingested_at
+            FROM market_data.taker_buy_sell_volume_history
             WHERE exchange = %s
               AND symbol = %s
               AND market_type = %s
@@ -660,6 +720,96 @@ class Database:
                 item.mark_price,
                 item.index_price,
                 item.next_funding_time,
+                item.source_dataset,
+                item.run_id,
+            )
+            for item in record_list
+        ]
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.executemany(query, params)
+                return cursor.rowcount
+
+    def insert_long_short_ratios(self, records: Iterable[LongShortRatioRecord]) -> int:
+        record_list = list(records)
+        if not record_list:
+            return 0
+
+        query = """
+            INSERT INTO market_data.long_short_ratio_history (
+              exchange,
+              symbol,
+              market_type,
+              bar_interval,
+              open_time,
+              long_short_ratio,
+              long_account,
+              short_account,
+              source_dataset,
+              ingested_at,
+              run_id
+            ) VALUES (
+              %s, %s, %s, %s, %s, %s, %s, %s, %s,
+              CURRENT_TIMESTAMP AT TIME ZONE 'UTC', %s
+            )
+            ON CONFLICT (exchange, symbol, market_type, bar_interval, open_time)
+            DO NOTHING
+        """
+        params = [
+            (
+                item.exchange,
+                item.symbol,
+                item.market_type,
+                item.bar_interval,
+                item.open_time,
+                item.long_short_ratio,
+                item.long_account,
+                item.short_account,
+                item.source_dataset,
+                item.run_id,
+            )
+            for item in record_list
+        ]
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.executemany(query, params)
+                return cursor.rowcount
+
+    def insert_taker_buy_sell_volumes(self, records: Iterable[TakerBuySellVolumeRecord]) -> int:
+        record_list = list(records)
+        if not record_list:
+            return 0
+
+        query = """
+            INSERT INTO market_data.taker_buy_sell_volume_history (
+              exchange,
+              symbol,
+              market_type,
+              bar_interval,
+              open_time,
+              buy_volume,
+              sell_volume,
+              buy_sell_ratio,
+              source_dataset,
+              ingested_at,
+              run_id
+            ) VALUES (
+              %s, %s, %s, %s, %s, %s, %s, %s, %s,
+              CURRENT_TIMESTAMP AT TIME ZONE 'UTC', %s
+            )
+            ON CONFLICT (exchange, symbol, market_type, bar_interval, open_time)
+            DO NOTHING
+        """
+        params = [
+            (
+                item.exchange,
+                item.symbol,
+                item.market_type,
+                item.bar_interval,
+                item.open_time,
+                item.buy_volume,
+                item.sell_volume,
+                item.buy_sell_ratio,
                 item.source_dataset,
                 item.run_id,
             )

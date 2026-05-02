@@ -14,7 +14,7 @@ from .time_utils import to_naive_utc
 
 DEFAULT_EXCHANGES = ("binance", "bybit", "coinbase", "kucoin", "kucoinfutures")
 DEFAULT_INTERVALS = ("1h",)
-DEFAULT_WATCHLIST_ASSETS = ("BTC", "ETH", "MYX", "MOVR", "UB", "HUMA", "RAVE", "BNT", "TAIKO")
+DEFAULT_WATCHLIST_ASSETS = ("BTC", "ETH", "MYX", "MOVR", "UB", "HUMA", "RAVE", "BNT", "TAIKO", "LAB")
 DEFAULT_DASHBOARD_INTERVALS = ("1m", "5m", "1h")
 DEFAULT_DASHBOARD_EXCHANGES = ("binance", "bybit", "kucoinfutures", "coinbase")
 DEFAULT_DASHBOARD_DATASETS = (
@@ -23,6 +23,8 @@ DEFAULT_DASHBOARD_DATASETS = (
     "index_price_kline",
     "open_interest",
     "funding_rate",
+    "long_short_ratio",
+    "taker_buy_sell_volume",
     "liquidation",
 )
 DEFAULT_DASHBOARD_SPOT_QUOTES = ("USD", "USDC", "USDT")
@@ -300,6 +302,14 @@ def _dashboard_jobs_for_market(
             target_intervals = tuple(interval for interval in intervals if interval in {"5m", "1h"})
         elif dataset == "funding_rate":
             target_intervals = ("8h",)
+        elif dataset == "long_short_ratio":
+            if exchange != "binance" or market_type != "perpetual":
+                continue
+            target_intervals = tuple(interval for interval in intervals if interval in {"5m", "1h"})
+        elif dataset == "taker_buy_sell_volume":
+            if exchange != "binance" or market_type != "perpetual":
+                continue
+            target_intervals = tuple(interval for interval in intervals if interval in {"5m", "1h"})
         elif dataset == "liquidation":
             target_intervals = ("event",)
         else:

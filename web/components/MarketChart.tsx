@@ -1,17 +1,29 @@
 "use client";
 
-import { useState } from "react";
-import type { Candle, ExchangeLinePoint, ExchangeLiquidationPoint, LinePoint, LiquidationPoint } from "@/lib/types";
+import { useEffect, useRef, useState } from "react";
+import type {
+  Candle,
+  ExchangeLinePoint,
+  ExchangeLiquidationPoint,
+  ExchangeTakerBuySellPoint,
+  LinePoint,
+  LiquidationPoint,
+  TakerBuySellPoint
+} from "@/lib/types";
 
 type MarketChartProps = {
   candles: Candle[];
   markPrice: LinePoint[];
   indexPrice: LinePoint[];
   openInterest: LinePoint[];
+  longShortRatio: LinePoint[];
+  takerBuySell: TakerBuySellPoint[];
   liquidations: LiquidationPoint[];
   fundingRate: LinePoint[];
   volumeBreakdown: ExchangeLinePoint[];
   openInterestBreakdown: ExchangeLinePoint[];
+  longShortRatioBreakdown: ExchangeLinePoint[];
+  takerBuySellBreakdown: ExchangeTakerBuySellPoint[];
   liquidationBreakdown: ExchangeLiquidationPoint[];
   fundingRateBreakdown: ExchangeLinePoint[];
 };
@@ -29,6 +41,8 @@ type HoverState = {
   index: LinePoint | null;
   openInterest: LinePoint | null;
   oiVolumeRatio: LinePoint | null;
+  longShortRatio: LinePoint | null;
+  takerBuySell: TakerBuySellPoint | null;
   liquidation: LiquidationPoint | null;
   funding: LinePoint | null;
   exchangeBreakdown: ExchangeHoverRow[];
@@ -39,6 +53,10 @@ type ExchangeHoverRow = {
   volume: number | null;
   openInterest: number | null;
   oiVolumeRatio: number | null;
+  longShortRatio: number | null;
+  takerBuyVolume: number | null;
+  takerSellVolume: number | null;
+  takerBuySellRatio: number | null;
   liquidation: number | null;
   funding: number | null;
 };
@@ -51,8 +69,10 @@ const panels = {
   price: { top: 22, height: 330, label: "PRICE", note: "Candles / Volume / Mark / Index" },
   openInterest: { top: 352, height: 130, label: "OPEN INTEREST", note: "OI value or amount" },
   oiVolumeRatio: { top: 482, height: 130, label: "OI / VOLUME", note: "Positioning intensity" },
-  liquidation: { top: 612, height: 130, label: "LIQUIDATION", note: "Long below zero / Short above zero" },
-  funding: { top: 742, height: 130, label: "FUNDING RATE", note: "Positive / Negative funding" }
+  longShortRatio: { top: 612, height: 120, label: "LONG / SHORT", note: "Binance account ratio; 1m uses 5m" },
+  takerBuySell: { top: 732, height: 130, label: "TAKER B/S", note: "Binance taker volume; 1m uses 5m" },
+  liquidation: { top: 862, height: 130, label: "LIQUIDATION", note: "Quote notional, USDT/USD approx." },
+  funding: { top: 992, height: 130, label: "FUNDING RATE", note: "Positive / Negative funding" }
 };
 const plotBottom = panels.funding.top + panels.funding.height;
 const xAxisLabelY = plotBottom + 22;
@@ -214,11 +234,32 @@ function nearestByTimeWithin<T extends { time: number }>(points: T[], time: numb
   return nearest;
 }
 
+function liquidationAtBucket(points: LiquidationPoint[], time: number, maxDistanceSeconds: number): LiquidationPoint {
+  const point = nearestByTimeWithin(points, time, maxDistanceSeconds);
+  return point ?? {
+    time,
+    longValue: 0,
+    shortValue: 0,
+    totalValue: 0,
+    count: 0
+  };
+}
+
+function exchangeLiquidationAtBucket(
+  points: ExchangeLiquidationPoint[],
+  time: number,
+  maxDistanceSeconds: number
+): ExchangeLiquidationPoint | null {
+  return nearestByTimeWithin(points, time, maxDistanceSeconds);
+}
+
 function buildExchangeHoverRows({
   time,
   stepSeconds,
   volumeBreakdown,
   openInterestBreakdown,
+  longShortRatioBreakdown,
+  takerBuySellBreakdown,
   liquidationBreakdown,
   fundingRateBreakdown
 }: {
@@ -226,12 +267,16 @@ function buildExchangeHoverRows({
   stepSeconds: number;
   volumeBreakdown: ExchangeLinePoint[];
   openInterestBreakdown: ExchangeLinePoint[];
+  longShortRatioBreakdown: ExchangeLinePoint[];
+  takerBuySellBreakdown: ExchangeTakerBuySellPoint[];
   liquidationBreakdown: ExchangeLiquidationPoint[];
   fundingRateBreakdown: ExchangeLinePoint[];
 }) {
   const observed = new Set([
     ...volumeBreakdown.map((point) => point.exchange),
     ...openInterestBreakdown.map((point) => point.exchange),
+    ...longShortRatioBreakdown.map((point) => point.exchange),
+    ...takerBuySellBreakdown.map((point) => point.exchange),
     ...liquidationBreakdown.map((point) => point.exchange),
     ...fundingRateBreakdown.map((point) => point.exchange)
   ]);
@@ -252,10 +297,20 @@ function buildExchangeHoverRows({
         time,
         Math.max(stepSeconds * 1.2, 360)
       );
-      const liquidation = nearestByTimeWithin(
+      const liquidation = exchangeLiquidationAtBucket(
         liquidationBreakdown.filter((point) => point.exchange === exchange),
         time,
-        Math.max(stepSeconds * 0.75, 60)
+        Math.max(stepSeconds * 0.45, 1)
+      );
+      const longShortRatio = nearestByTimeWithin(
+        longShortRatioBreakdown.filter((point) => point.exchange === exchange),
+        time,
+        Math.max(stepSeconds * 1.2, 360)
+      );
+      const takerBuySell = nearestByTimeWithin(
+        takerBuySellBreakdown.filter((point) => point.exchange === exchange),
+        time,
+        Math.max(stepSeconds * 1.2, 360)
       );
       const funding = nearestByTimeWithin(
         fundingRateBreakdown.filter((point) => point.exchange === exchange),
@@ -270,12 +325,26 @@ function buildExchangeHoverRows({
         volume: volumeValue,
         openInterest: oiValue,
         oiVolumeRatio: oiValue !== null && volumeValue !== null && volumeValue > 0 ? oiValue / volumeValue : null,
-        liquidation: liquidation?.totalValue ?? null,
+        longShortRatio: longShortRatio?.value ?? null,
+        takerBuyVolume: takerBuySell?.buyVolume ?? null,
+        takerSellVolume: takerBuySell?.sellVolume ?? null,
+        takerBuySellRatio: takerBuySell?.buySellRatio ?? null,
+        liquidation: liquidation?.totalValue ?? 0,
         funding: funding?.value ?? null
       };
     })
     .filter((row) =>
-      [row.volume, row.openInterest, row.oiVolumeRatio, row.liquidation, row.funding].some(
+      [
+        row.volume,
+        row.openInterest,
+        row.oiVolumeRatio,
+        row.longShortRatio,
+        row.takerBuyVolume,
+        row.takerSellVolume,
+        row.takerBuySellRatio,
+        row.liquidation,
+        row.funding
+      ].some(
         (value) => value !== null && value !== undefined
       )
     );
@@ -296,19 +365,73 @@ function buildOiVolumeRatio(candles: Candle[], openInterest: LinePoint[]) {
   });
 }
 
+function clampDomainToRange(domain: Domain, fullDomain: Domain, minSpan: number): Domain {
+  const fullSpan = fullDomain.max - fullDomain.min;
+  const span = Math.max(minSpan, Math.min(domain.max - domain.min, fullSpan));
+  const center = (domain.min + domain.max) / 2;
+  let min = center - span / 2;
+  let max = center + span / 2;
+
+  if (min < fullDomain.min) {
+    max += fullDomain.min - min;
+    min = fullDomain.min;
+  }
+  if (max > fullDomain.max) {
+    min -= max - fullDomain.max;
+    max = fullDomain.max;
+  }
+
+  return {
+    min: Math.max(fullDomain.min, min),
+    max: Math.min(fullDomain.max, max)
+  };
+}
+
 export default function MarketChart({
   candles,
   markPrice,
   indexPrice,
   openInterest,
+  longShortRatio,
+  takerBuySell,
   liquidations,
   fundingRate,
   volumeBreakdown,
   openInterestBreakdown,
+  longShortRatioBreakdown,
+  takerBuySellBreakdown,
   liquidationBreakdown,
   fundingRateBreakdown
 }: MarketChartProps) {
   const [hover, setHover] = useState<HoverState | null>(null);
+  const [zoomDomain, setZoomDomain] = useState<Domain | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const firstCandleTime = candles[0]?.time ?? null;
+  const lastCandleTime = candles[candles.length - 1]?.time ?? null;
+
+  useEffect(() => {
+    function updateFullscreenState() {
+      setIsFullscreen(document.fullscreenElement === containerRef.current);
+    }
+
+    document.addEventListener("fullscreenchange", updateFullscreenState);
+    return () => document.removeEventListener("fullscreenchange", updateFullscreenState);
+  }, []);
+
+  useEffect(() => {
+    if (firstCandleTime === null || lastCandleTime === null) {
+      setZoomDomain(null);
+      setHover(null);
+      return;
+    }
+
+    const fullDomain = { min: firstCandleTime, max: lastCandleTime };
+    const fullSpan = Math.max(fullDomain.max - fullDomain.min, 1);
+    const candleStep = Math.max(60, Math.round(fullSpan / Math.max(candles.length - 1, 1)));
+    const minSpan = candleStep * Math.min(40, Math.max(candles.length - 1, 1));
+    setZoomDomain((domain) => (domain ? clampDomainToRange(domain, fullDomain, minSpan) : null));
+  }, [candles.length, firstCandleTime, lastCandleTime]);
 
   if (!candles.length) {
     return (
@@ -319,18 +442,30 @@ export default function MarketChart({
   }
 
   const xDomain = {
+    min: zoomDomain?.min ?? candles[0].time,
+    max: zoomDomain?.max ?? candles[candles.length - 1].time
+  };
+  const fullXDomain = {
     min: candles[0].time,
     max: candles[candles.length - 1].time
   };
+  const fullSpan = Math.max(fullXDomain.max - fullXDomain.min, 1);
+  const candleStep = Math.max(60, Math.round(fullSpan / Math.max(candles.length - 1, 1)));
+  const minZoomSpan = candleStep * Math.min(40, Math.max(candles.length - 1, 1));
+  const currentZoom = Math.max(1, fullSpan / Math.max(xDomain.max - xDomain.min, 1));
   const visibleCandles = filteredPoints(candles, xDomain);
   const visibleMark = filteredPoints(markPrice, xDomain);
   const visibleIndex = filteredPoints(indexPrice, xDomain);
   const visibleOi = filteredPoints(openInterest, xDomain);
   const visibleOiVolumeRatio = filteredPoints(buildOiVolumeRatio(candles, openInterest), xDomain);
+  const visibleLongShortRatio = filteredPoints(longShortRatio, xDomain);
+  const visibleTakerBuySell = filteredPoints(takerBuySell, xDomain);
   const visibleLiquidations = filteredPoints(liquidations, xDomain);
   const visibleFunding = filteredPoints(fundingRate, xDomain);
   const visibleVolumeBreakdown = filteredPoints(volumeBreakdown, xDomain);
   const visibleOiBreakdown = filteredPoints(openInterestBreakdown, xDomain);
+  const visibleLongShortBreakdown = filteredPoints(longShortRatioBreakdown, xDomain);
+  const visibleTakerBuySellBreakdown = filteredPoints(takerBuySellBreakdown, xDomain);
   const visibleLiquidationBreakdown = filteredPoints(liquidationBreakdown, xDomain);
   const visibleFundingBreakdown = filteredPoints(fundingRateBreakdown, xDomain);
 
@@ -342,6 +477,12 @@ export default function MarketChart({
   const volumeDomain = valueDomain([0, ...visibleCandles.map((bar) => bar.volume)]);
   const oiDomain = valueDomain(visibleOi.map((point) => point.value));
   const oiVolumeDomain = valueDomain(visibleOiVolumeRatio.map((point) => point.value));
+  const longShortDomain = valueDomain(visibleLongShortRatio.map((point) => point.value));
+  const takerBuySellMax = Math.max(
+    ...visibleTakerBuySell.flatMap((point) => [point.buyVolume, point.sellVolume]),
+    0
+  );
+  const takerBuySellDomain = { min: -Math.max(takerBuySellMax, 1), max: Math.max(takerBuySellMax, 1) };
   const liquidationMax = Math.max(
     ...visibleLiquidations.flatMap((point) => [point.longValue, point.shortValue]),
     0
@@ -363,13 +504,17 @@ export default function MarketChart({
       index: nearestByTime(visibleIndex, candle.time),
       openInterest: nearestByTime(visibleOi, candle.time),
       oiVolumeRatio: nearestByTime(visibleOiVolumeRatio, candle.time),
-      liquidation: nearestByTime(visibleLiquidations, candle.time),
+      longShortRatio: nearestByTime(visibleLongShortRatio, candle.time),
+      takerBuySell: nearestByTime(visibleTakerBuySell, candle.time),
+      liquidation: liquidationAtBucket(visibleLiquidations, candle.time, Math.max(stepSeconds * 0.45, 1)),
       funding: nearestByTime(visibleFunding, candle.time),
       exchangeBreakdown: buildExchangeHoverRows({
         time: candle.time,
         stepSeconds,
         volumeBreakdown: visibleVolumeBreakdown,
         openInterestBreakdown: visibleOiBreakdown,
+        longShortRatioBreakdown: visibleLongShortBreakdown,
+        takerBuySellBreakdown: visibleTakerBuySellBreakdown,
         liquidationBreakdown: visibleLiquidationBreakdown,
         fundingRateBreakdown: visibleFundingBreakdown
       })
@@ -401,15 +546,88 @@ export default function MarketChart({
     setHover(buildHoverState(candle, svgY));
   }
 
-  const activeHover = hover ?? buildHoverState(visibleCandles[visibleCandles.length - 1], panels.price.top + 64);
+  function zoomBy(multiplier: number) {
+    const center = hover?.candle.time ?? (xDomain.min + xDomain.max) / 2;
+    const currentSpan = xDomain.max - xDomain.min;
+    const nextSpan = currentSpan * multiplier;
+
+    if (nextSpan >= fullSpan * 0.98) {
+      setZoomDomain(null);
+      setHover(null);
+      return;
+    }
+
+    setZoomDomain(clampDomainToRange({ min: center - nextSpan / 2, max: center + nextSpan / 2 }, fullXDomain, minZoomSpan));
+    setHover(null);
+  }
+
+  function resetZoom() {
+    setZoomDomain(null);
+    setHover(null);
+  }
+
+  function toggleFullscreen() {
+    const element = containerRef.current;
+    if (!element) {
+      return;
+    }
+
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+      return;
+    }
+
+    void element.requestFullscreen();
+  }
+
+  const activeCandle = visibleCandles[visibleCandles.length - 1] ?? candles[candles.length - 1];
+  const activeHover = hover ?? buildHoverState(activeCandle, panels.price.top + 64);
 
   return (
-    <div className="overflow-hidden rounded-[1.6rem] border border-moss/10 bg-cream/35">
+    <div
+      ref={containerRef}
+      className={`relative overflow-hidden rounded-[1.6rem] border border-moss/10 bg-cream/35 ${
+        isFullscreen ? "h-screen w-screen rounded-none border-0 bg-cream p-3" : ""
+      }`}
+    >
+      <div className="absolute right-3 top-3 z-20 flex flex-wrap items-center justify-end gap-2">
+        <span className="rounded-full border border-moss/10 bg-cream/90 px-3 py-2 text-[11px] font-black uppercase tracking-[0.14em] text-moss shadow-sm">
+          Zoom {currentZoom.toFixed(currentZoom >= 10 ? 0 : 1)}x
+        </span>
+        <button
+          type="button"
+          onClick={() => zoomBy(0.5)}
+          className="rounded-full bg-ink px-3 py-2 text-[11px] font-black uppercase tracking-[0.14em] text-cream shadow-sm transition hover:bg-moss"
+        >
+          Zoom In
+        </button>
+        <button
+          type="button"
+          onClick={() => zoomBy(2)}
+          className="rounded-full bg-moss/10 px-3 py-2 text-[11px] font-black uppercase tracking-[0.14em] text-moss shadow-sm transition hover:bg-moss/20"
+        >
+          Zoom Out
+        </button>
+        <button
+          type="button"
+          onClick={resetZoom}
+          className="rounded-full bg-moss/10 px-3 py-2 text-[11px] font-black uppercase tracking-[0.14em] text-moss shadow-sm transition hover:bg-moss/20"
+        >
+          Reset
+        </button>
+        <button
+          type="button"
+          onClick={toggleFullscreen}
+          className="rounded-full bg-brass px-3 py-2 text-[11px] font-black uppercase tracking-[0.14em] text-ink shadow-sm transition hover:bg-brass/80"
+        >
+          {isFullscreen ? "Exit Full" : "Full Screen"}
+        </button>
+      </div>
       <svg
         role="img"
         aria-label="Stacked market chart"
         viewBox={`0 0 ${width} ${height}`}
-        className="block h-auto w-full"
+        className={isFullscreen ? "block h-[calc(100vh-1.5rem)] w-full" : "block h-auto w-full"}
         preserveAspectRatio="none"
         onPointerMove={handlePointer}
         onPointerDown={handlePointer}
@@ -466,6 +684,16 @@ export default function MarketChart({
           color="#c68e3f"
           emptyLabel="No OI / volume history"
         />
+        <LinePanel
+          points={visibleLongShortRatio}
+          xDomain={xDomain}
+          yDomain={longShortDomain}
+          top={panels.longShortRatio.top}
+          panelHeight={panels.longShortRatio.height}
+          color="#4b6f92"
+          emptyLabel="No long / short ratio history"
+        />
+        <TakerBuySellPanel points={visibleTakerBuySell} xDomain={xDomain} yDomain={takerBuySellDomain} />
         <LiquidationPanel points={visibleLiquidations} xDomain={xDomain} yDomain={liquidationDomain} />
         <FundingPanel points={visibleFunding} xDomain={xDomain} yDomain={fundingDomain} />
         <rect
@@ -490,6 +718,8 @@ export default function MarketChart({
             priceDomain={priceDomain}
             oiDomain={oiDomain}
             oiVolumeDomain={oiVolumeDomain}
+            longShortDomain={longShortDomain}
+            takerBuySellDomain={takerBuySellDomain}
             liquidationDomain={liquidationDomain}
             fundingDomain={fundingDomain}
           />
@@ -615,6 +845,39 @@ function LinePanel({
   );
 }
 
+function TakerBuySellPanel({ points, xDomain, yDomain }: { points: TakerBuySellPoint[]; xDomain: Domain; yDomain: Domain }) {
+  const panel = panels.takerBuySell;
+  const zeroY = yScale(0, yDomain, panel.top, panel.height);
+  const barWidth = Math.max(1, Math.min(8, (plotWidth / Math.max(points.length, 1)) * 0.55));
+
+  if (!points.length) {
+    return <EmptyLabel top={panel.top} panelHeight={panel.height} label="No taker buy / sell history" />;
+  }
+
+  return (
+    <g>
+      <line x1={left} x2={left + plotWidth} y1={zeroY} y2={zeroY} stroke="rgba(36,49,38,0.18)" />
+      {ticks(yDomain, 3).map((tick, index) => (
+        <text key={`taker-y-${tick}-${index}`} x={width - 10} y={yScale(tick, yDomain, panel.top, panel.height) + 4} textAnchor="end" className="fill-moss/55 text-[12px]">
+          {formatValue(Math.abs(tick))}
+        </text>
+      ))}
+      {points.map((point, index) => {
+        const x = xScale(point.time, xDomain);
+        const buyY = yScale(point.buyVolume, yDomain, panel.top, panel.height);
+        const sellY = yScale(-point.sellVolume, yDomain, panel.top, panel.height);
+
+        return (
+          <g key={`taker-buy-sell-${point.time}-${index}`}>
+            <rect x={x - barWidth / 2} y={buyY} width={barWidth} height={zeroY - buyY} fill="rgba(45,125,85,0.72)" />
+            <rect x={x - barWidth / 2} y={zeroY} width={barWidth} height={sellY - zeroY} fill="rgba(217,87,63,0.72)" />
+          </g>
+        );
+      })}
+    </g>
+  );
+}
+
 function LiquidationPanel({ points, xDomain, yDomain }: { points: LiquidationPoint[]; xDomain: Domain; yDomain: Domain }) {
   const panel = panels.liquidation;
   const zeroY = yScale(0, yDomain, panel.top, panel.height);
@@ -699,6 +962,8 @@ function CrosshairOverlay({
   priceDomain,
   oiDomain,
   oiVolumeDomain,
+  longShortDomain,
+  takerBuySellDomain,
   liquidationDomain,
   fundingDomain
 }: {
@@ -706,24 +971,15 @@ function CrosshairOverlay({
   priceDomain: Domain;
   oiDomain: Domain;
   oiVolumeDomain: Domain;
+  longShortDomain: Domain;
+  takerBuySellDomain: Domain;
   liquidationDomain: Domain;
   fundingDomain: Domain;
 }) {
   const exchangeLines = hover.exchangeBreakdown.map((row) => {
     const label = exchangeLabels[row.exchange] ?? row.exchange;
-    return `${label}: V ${formatCompactValue(row.volume)} | OI ${formatCompactValue(row.openInterest)} | OI/V ${formatCompactValue(row.oiVolumeRatio)} | Liq ${formatCompactValue(row.liquidation)} | F ${formatPercent(row.funding)}`;
+    return `${label}: V ${formatCompactValue(row.volume)} | OI ${formatCompactValue(row.openInterest)} | OI/V ${formatCompactValue(row.oiVolumeRatio)} | L/S ${formatCompactValue(row.longShortRatio)} | Taker B/S ${formatCompactValue(row.takerBuySellRatio)} (B ${formatCompactValue(row.takerBuyVolume)} / S ${formatCompactValue(row.takerSellVolume)}) | Liq ${formatCompactValue(row.liquidation)} quote | F ${formatPercent(row.funding)}`;
   });
-  const tooltipWidth = exchangeLines.length ? 560 : 330;
-  const tooltipHeight = 264 + (exchangeLines.length ? 32 + exchangeLines.length * 18 : 0);
-  const tooltipX = hover.x > width - tooltipWidth - 28 ? hover.x - tooltipWidth - 16 : hover.x + 16;
-  const tooltipY = hover.y > height - tooltipHeight - 20 ? hover.y - tooltipHeight - 14 : hover.y + 14;
-  const closeY = yScale(hover.candle.close, priceDomain, panels.price.top, panels.price.height);
-  const oiY = hover.openInterest ? yScale(hover.openInterest.value, oiDomain, panels.openInterest.top, panels.openInterest.height) : null;
-  const oiVolumeY = hover.oiVolumeRatio ? yScale(hover.oiVolumeRatio.value, oiVolumeDomain, panels.oiVolumeRatio.top, panels.oiVolumeRatio.height) : null;
-  const liquidationY = hover.liquidation
-    ? yScale(hover.liquidation.shortValue || -hover.liquidation.longValue || 0, liquidationDomain, panels.liquidation.top, panels.liquidation.height)
-    : null;
-  const fundingY = hover.funding ? yScale(hover.funding.value, fundingDomain, panels.funding.top, panels.funding.height) : null;
   const lines = [
     `Time: ${formatExactTime(hover.candle.time)}`,
     `O: ${formatPreciseValue(hover.candle.open, 8)}  H: ${formatPreciseValue(hover.candle.high, 8)}`,
@@ -733,10 +989,39 @@ function CrosshairOverlay({
     `Index: ${formatPreciseValue(hover.index?.value, 8)}`,
     `OI: ${formatPreciseValue(hover.openInterest?.value, 4)}`,
     `OI / Volume: ${formatPreciseValue(hover.oiVolumeRatio?.value, 4)}`,
-    `Liq long: ${formatPreciseValue(hover.liquidation?.longValue, 4)}`,
-    `Liq short: ${formatPreciseValue(hover.liquidation?.shortValue, 4)}`,
+    `Long / Short account ratio: ${formatPreciseValue(hover.longShortRatio?.value, 6)}`,
+    `Taker buy volume: ${formatPreciseValue(hover.takerBuySell?.buyVolume, 4)}`,
+    `Taker sell volume: ${formatPreciseValue(hover.takerBuySell?.sellVolume, 4)}`,
+    `Taker buy / sell ratio: ${formatPreciseValue(hover.takerBuySell?.buySellRatio, 6)}`,
+    `Liq long quote notional: ${formatPreciseValue(hover.liquidation?.longValue, 4)} USDT/USD`,
+    `Liq short quote notional: ${formatPreciseValue(hover.liquidation?.shortValue, 4)} USDT/USD`,
     `Funding: ${formatPercent(hover.funding?.value)}`
   ];
+  const tooltipWidth = exchangeLines.length ? 780 : 430;
+  const baseLineStartY = 52;
+  const lineHeight = 18;
+  const exchangeHeaderY = baseLineStartY + lines.length * lineHeight + 12;
+  const tooltipHeight = exchangeHeaderY + (exchangeLines.length ? 24 + exchangeLines.length * lineHeight : 12);
+  const tooltipX = hover.x > width - tooltipWidth - 28 ? hover.x - tooltipWidth - 16 : hover.x + 16;
+  const tooltipY = hover.y > height - tooltipHeight - 20 ? hover.y - tooltipHeight - 14 : hover.y + 14;
+  const closeY = yScale(hover.candle.close, priceDomain, panels.price.top, panels.price.height);
+  const oiY = hover.openInterest ? yScale(hover.openInterest.value, oiDomain, panels.openInterest.top, panels.openInterest.height) : null;
+  const oiVolumeY = hover.oiVolumeRatio ? yScale(hover.oiVolumeRatio.value, oiVolumeDomain, panels.oiVolumeRatio.top, panels.oiVolumeRatio.height) : null;
+  const longShortY = hover.longShortRatio ? yScale(hover.longShortRatio.value, longShortDomain, panels.longShortRatio.top, panels.longShortRatio.height) : null;
+  const takerBuySellY = hover.takerBuySell
+    ? yScale(
+        hover.takerBuySell.buyVolume >= hover.takerBuySell.sellVolume
+          ? hover.takerBuySell.buyVolume
+          : -hover.takerBuySell.sellVolume,
+        takerBuySellDomain,
+        panels.takerBuySell.top,
+        panels.takerBuySell.height
+      )
+    : null;
+  const liquidationY = hover.liquidation
+    ? yScale(hover.liquidation.shortValue || -hover.liquidation.longValue || 0, liquidationDomain, panels.liquidation.top, panels.liquidation.height)
+    : null;
+  const fundingY = hover.funding ? yScale(hover.funding.value, fundingDomain, panels.funding.top, panels.funding.height) : null;
 
   return (
     <g pointerEvents="none">
@@ -760,6 +1045,8 @@ function CrosshairOverlay({
       <circle cx={hover.x} cy={closeY} r="4.5" fill="#101410" stroke="#fff5df" strokeWidth="2" />
       {oiY !== null ? <circle cx={hover.x} cy={oiY} r="4" fill="#243126" stroke="#fff5df" strokeWidth="2" /> : null}
       {oiVolumeY !== null ? <circle cx={hover.x} cy={oiVolumeY} r="4" fill="#c68e3f" stroke="#fff5df" strokeWidth="2" /> : null}
+      {longShortY !== null ? <circle cx={hover.x} cy={longShortY} r="4" fill="#4b6f92" stroke="#fff5df" strokeWidth="2" /> : null}
+      {takerBuySellY !== null ? <circle cx={hover.x} cy={takerBuySellY} r="4" fill="#2d7d55" stroke="#fff5df" strokeWidth="2" /> : null}
       {liquidationY !== null ? <circle cx={hover.x} cy={liquidationY} r="4" fill="#d9573f" stroke="#fff5df" strokeWidth="2" /> : null}
       {fundingY !== null ? <circle cx={hover.x} cy={fundingY} r="4" fill="#c68e3f" stroke="#fff5df" strokeWidth="2" /> : null}
       <g>
@@ -779,14 +1066,14 @@ function CrosshairOverlay({
           <text
             key={`${index}-${line}`}
             x={tooltipX + 16}
-            y={tooltipY + 52 + index * 18}
+            y={tooltipY + baseLineStartY + index * lineHeight}
             className={index === 0 ? "fill-brass text-[13px] font-bold" : "fill-cream/90 text-[13px]"}
           >
             {line}
           </text>
         ))}
         {exchangeLines.length ? (
-          <text x={tooltipX + 16} y={tooltipY + 262} className="fill-brass text-[12px] font-black tracking-[0.14em]">
+          <text x={tooltipX + 16} y={tooltipY + exchangeHeaderY} className="fill-brass text-[12px] font-black tracking-[0.14em]">
             EXCHANGE BREAKDOWN
           </text>
         ) : null}
@@ -794,7 +1081,7 @@ function CrosshairOverlay({
           <text
             key={`exchange-breakdown-${index}-${line}`}
             x={tooltipX + 16}
-            y={tooltipY + 286 + index * 18}
+            y={tooltipY + exchangeHeaderY + 24 + index * lineHeight}
             className="fill-cream/90 text-[12px]"
           >
             {line}

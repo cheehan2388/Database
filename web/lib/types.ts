@@ -50,6 +50,17 @@ export type ExchangeLiquidationPoint = LiquidationPoint & {
   exchange: string;
 };
 
+export type TakerBuySellPoint = {
+  time: number;
+  buyVolume: number;
+  sellVolume: number;
+  buySellRatio: number;
+};
+
+export type ExchangeTakerBuySellPoint = TakerBuySellPoint & {
+  exchange: string;
+};
+
 export type ChartResponse = {
   exchange: string;
   symbol: string;
@@ -63,9 +74,13 @@ export type ChartResponse = {
 
 export type DerivativesResponse = {
   openInterest: LinePoint[];
+  longShortRatio: LinePoint[];
+  takerBuySell: TakerBuySellPoint[];
   fundingRate: LinePoint[];
   liquidations: LiquidationPoint[];
   openInterestBreakdown?: ExchangeLinePoint[];
+  longShortRatioBreakdown?: ExchangeLinePoint[];
+  takerBuySellBreakdown?: ExchangeTakerBuySellPoint[];
   fundingRateBreakdown?: ExchangeLinePoint[];
   liquidationBreakdown?: ExchangeLiquidationPoint[];
 };

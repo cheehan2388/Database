@@ -50,6 +50,13 @@ type AggregateExchangeLiquidationRow = AggregateLiquidationRow & {
   exchange: string;
 };
 
+type TakerBuySellRow = {
+  open_time: Date;
+  buy_volume: string | null;
+  sell_volume: string | null;
+  buy_sell_ratio: string;
+};
+
 export function normalizeSelection(input?: Partial<Record<string, string | string[] | undefined>>): Selection {
   const rawAsset = Array.isArray(input?.asset) ? input?.asset[0] : input?.asset;
   const rawExchange = Array.isArray(input?.exchange) ? input?.exchange[0] : input?.exchange;
@@ -655,6 +662,80 @@ async function fetchAggregateFundingRateBreakdown(asset: string) {
   }));
 }
 
+async function fetchBinanceLongShortRatio(asset: string, interval: string) {
+  const { rows } = await pool.query<AggregateLineRow>(
+    `
+      SELECT l.open_time, l.long_short_ratio AS value
+      FROM market_data.long_short_ratio_history l
+      JOIN market_data.asset_registry a
+        ON a.exchange = l.exchange
+       AND a.symbol = l.symbol
+       AND a.market_type = l.market_type
+       AND a.is_active = TRUE
+      WHERE l.exchange = 'binance'
+        AND l.market_type = 'perpetual'
+        AND l.bar_interval = $2
+        AND upper(a.base_asset) = $1
+      ORDER BY l.open_time DESC
+      LIMIT 600;
+    `,
+    [asset, interval]
+  );
+
+  return rows.reverse().map((row) => ({
+    time: toSeconds(row.open_time),
+    value: Number(row.value ?? 0)
+  }));
+}
+
+async function fetchBinanceLongShortRatioBreakdown(asset: string, interval: string) {
+  const rows = await fetchBinanceLongShortRatio(asset, interval);
+  return rows.map((row) => ({
+    ...row,
+    exchange: "binance"
+  }));
+}
+
+async function fetchBinanceTakerBuySell(asset: string, interval: string) {
+  const { rows } = await pool.query<TakerBuySellRow>(
+    `
+      SELECT
+        t.open_time,
+        t.buy_volume,
+        t.sell_volume,
+        t.buy_sell_ratio
+      FROM market_data.taker_buy_sell_volume_history t
+      JOIN market_data.asset_registry a
+        ON a.exchange = t.exchange
+       AND a.symbol = t.symbol
+       AND a.market_type = t.market_type
+       AND a.is_active = TRUE
+      WHERE t.exchange = 'binance'
+        AND t.market_type = 'perpetual'
+        AND t.bar_interval = $2
+        AND upper(a.base_asset) = $1
+      ORDER BY t.open_time DESC
+      LIMIT 600;
+    `,
+    [asset, interval]
+  );
+
+  return rows.reverse().map((row) => ({
+    time: toSeconds(row.open_time),
+    buyVolume: Number(row.buy_volume ?? 0),
+    sellVolume: Number(row.sell_volume ?? 0),
+    buySellRatio: Number(row.buy_sell_ratio)
+  }));
+}
+
+async function fetchBinanceTakerBuySellBreakdown(asset: string, interval: string) {
+  const rows = await fetchBinanceTakerBuySell(asset, interval);
+  return rows.map((row) => ({
+    ...row,
+    exchange: "binance"
+  }));
+}
+
 async function fetchAggregateLiquidations(asset: string, interval: Interval) {
   const liquidationBucket = bucketExpression(interval);
   const { rows } = await pool.query<AggregateLiquidationRow>(
@@ -744,9 +825,15 @@ async function fetchAggregateLiquidationBreakdown(asset: string, interval: Inter
 export async function getDerivatives(selection: Selection): Promise<DerivativesResponse> {
   if (selection.exchange === "all") {
     const oiInterval = selection.interval === "1m" ? "5m" : selection.interval;
+    const longShortInterval = selection.interval === "1m" ? "5m" : selection.interval;
+    const takerBuySellInterval = selection.interval === "1m" ? "5m" : selection.interval;
     const [
       openInterest,
       openInterestBreakdown,
+      longShortRatio,
+      longShortRatioBreakdown,
+      takerBuySell,
+      takerBuySellBreakdown,
       fundingRate,
       fundingRateBreakdown,
       liquidations,
@@ -754,6 +841,10 @@ export async function getDerivatives(selection: Selection): Promise<DerivativesR
     ] = await Promise.all([
       fetchAggregateOpenInterest(selection.asset, oiInterval),
       fetchAggregateOpenInterestBreakdown(selection.asset, oiInterval),
+      fetchBinanceLongShortRatio(selection.asset, longShortInterval),
+      fetchBinanceLongShortRatioBreakdown(selection.asset, longShortInterval),
+      fetchBinanceTakerBuySell(selection.asset, takerBuySellInterval),
+      fetchBinanceTakerBuySellBreakdown(selection.asset, takerBuySellInterval),
       fetchAggregateFundingRate(selection.asset),
       fetchAggregateFundingRateBreakdown(selection.asset),
       fetchAggregateLiquidations(selection.asset, selection.interval),
@@ -762,9 +853,13 @@ export async function getDerivatives(selection: Selection): Promise<DerivativesR
 
     return {
       openInterest,
+      longShortRatio,
+      takerBuySell,
       fundingRate,
       liquidations,
       openInterestBreakdown,
+      longShortRatioBreakdown,
+      takerBuySellBreakdown,
       fundingRateBreakdown,
       liquidationBreakdown
     };
@@ -774,18 +869,24 @@ export async function getDerivatives(selection: Selection): Promise<DerivativesR
   if (market.marketType !== "perpetual") {
     return {
       openInterest: [],
+      longShortRatio: [],
+      takerBuySell: [],
       fundingRate: [],
       liquidations: [],
       openInterestBreakdown: [],
+      longShortRatioBreakdown: [],
+      takerBuySellBreakdown: [],
       fundingRateBreakdown: [],
       liquidationBreakdown: []
     };
   }
   const symbol = market.symbol;
   const oiInterval = selection.interval === "1m" ? "5m" : selection.interval;
+  const longShortInterval = selection.interval === "1m" ? "5m" : selection.interval;
+  const takerBuySellInterval = selection.interval === "1m" ? "5m" : selection.interval;
   const liquidationBucket = bucketExpression(selection.interval);
 
-  const [openInterest, fundingRate, liquidations] = await Promise.all([
+  const [openInterest, longShortRatio, takerBuySell, fundingRate, liquidations] = await Promise.all([
     pool.query<{
       open_time: Date;
       open_interest_amount: string | null;
@@ -803,6 +904,39 @@ export async function getDerivatives(selection: Selection): Promise<DerivativesR
       `,
       [selection.exchange, symbol, oiInterval]
     ),
+    selection.exchange === "binance"
+      ? pool.query<{
+          open_time: Date;
+          long_short_ratio: string;
+        }>(
+          `
+            SELECT open_time, long_short_ratio
+            FROM market_data.long_short_ratio_history
+            WHERE exchange = $1
+              AND symbol = $2
+              AND market_type = 'perpetual'
+              AND bar_interval = $3
+            ORDER BY open_time DESC
+            LIMIT 600;
+          `,
+          [selection.exchange, symbol, longShortInterval]
+        )
+      : Promise.resolve({ rows: [] }),
+    selection.exchange === "binance"
+      ? pool.query<TakerBuySellRow>(
+          `
+            SELECT open_time, buy_volume, sell_volume, buy_sell_ratio
+            FROM market_data.taker_buy_sell_volume_history
+            WHERE exchange = $1
+              AND symbol = $2
+              AND market_type = 'perpetual'
+              AND bar_interval = $3
+            ORDER BY open_time DESC
+            LIMIT 600;
+          `,
+          [selection.exchange, symbol, takerBuySellInterval]
+        )
+      : Promise.resolve({ rows: [] }),
     pool.query<{
       funding_time: Date;
       funding_rate: string;
@@ -849,6 +983,16 @@ export async function getDerivatives(selection: Selection): Promise<DerivativesR
       time: toSeconds(row.open_time),
       value: Number(row.open_interest_value ?? row.open_interest_amount ?? 0)
     })),
+    longShortRatio: longShortRatio.rows.reverse().map((row) => ({
+      time: toSeconds(row.open_time),
+      value: Number(row.long_short_ratio)
+    })),
+    takerBuySell: takerBuySell.rows.reverse().map((row) => ({
+      time: toSeconds(row.open_time),
+      buyVolume: Number(row.buy_volume ?? 0),
+      sellVolume: Number(row.sell_volume ?? 0),
+      buySellRatio: Number(row.buy_sell_ratio)
+    })),
     fundingRate: fundingRate.rows.reverse().map((row) => ({
       time: toSeconds(row.funding_time),
       value: Number(row.funding_rate)
@@ -861,6 +1005,8 @@ export async function getDerivatives(selection: Selection): Promise<DerivativesR
       count: Number(row.event_count)
     })),
     openInterestBreakdown: [],
+    longShortRatioBreakdown: [],
+    takerBuySellBreakdown: [],
     fundingRateBreakdown: [],
     liquidationBreakdown: []
   };
